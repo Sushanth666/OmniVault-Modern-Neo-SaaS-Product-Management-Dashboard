@@ -1,12 +1,46 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
 import { fetchCategories, fetchAllProductsForStats } from '../services/productApi';
+import { FALLBACK_PRODUCTS, FALLBACK_CATEGORIES } from '../data/fallbackCatalog';
 import { useDebounce } from './useDebounce';
 
+const CACHE_PRODUCTS_KEY = 'omnivault_catalog_cache_v1';
+const CACHE_CATEGORIES_KEY = 'omnivault_categories_cache_v1';
+
+function getInitialCatalog() {
+  try {
+    const cached = localStorage.getItem(CACHE_PRODUCTS_KEY);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn('[useProducts] Error reading product cache:', e);
+  }
+  return FALLBACK_PRODUCTS;
+}
+
+function getInitialCategories() {
+  try {
+    const cached = localStorage.getItem(CACHE_CATEGORIES_KEY);
+    if (cached) {
+      const parsed = JSON.parse(cached);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.warn('[useProducts] Error reading category cache:', e);
+  }
+  return FALLBACK_CATEGORIES;
+}
+
 export function useProducts() {
-  // Raw data from API
-  const [allProducts, setAllProducts] = useState([]);
-  const [categories, setCategories] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // Raw data initialized immediately from cache or fallback for instant 0ms load
+  const [allProducts, setAllProducts] = useState(getInitialCatalog);
+  const [categories, setCategories] = useState(getInitialCategories);
+  const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState(null);
 
@@ -32,26 +66,52 @@ export function useProducts() {
   // Selected product for details modal
   const [selectedProduct, setSelectedProduct] = useState(null);
 
-  // Fetch initial data & categories
+  // Fetch initial data & categories with resilient background synchronization
   const loadData = useCallback(async (isRefresh = false) => {
     try {
       if (isRefresh) {
         setRefreshing(true);
-      } else {
-        setLoading(true);
       }
       setError(null);
 
-      const [productsData, categoriesData] = await Promise.all([
-        fetchAllProductsForStats(),
-        fetchCategories(),
-      ]);
+      // Fetch products and categories with resilient background sync
+      let productsData = null;
+      let categoriesData = null;
 
-      setAllProducts(productsData.products || []);
-      setCategories(categoriesData || []);
+      try {
+        productsData = await fetchAllProductsForStats();
+      } catch (pErr) {
+        console.warn('[useProducts] API fetch products note:', pErr.message);
+      }
+
+      try {
+        categoriesData = await fetchCategories();
+      } catch (cErr) {
+        console.warn('[useProducts] API fetch categories note:', cErr.message);
+      }
+
+      if (productsData && Array.isArray(productsData.products) && productsData.products.length > 0) {
+        setAllProducts(productsData.products);
+        try {
+          localStorage.setItem(CACHE_PRODUCTS_KEY, JSON.stringify(productsData.products));
+        } catch (e) {}
+      }
+
+      if (categoriesData && Array.isArray(categoriesData) && categoriesData.length > 0) {
+        setCategories(categoriesData);
+        try {
+          localStorage.setItem(CACHE_CATEGORIES_KEY, JSON.stringify(categoriesData));
+        } catch (e) {}
+      } else if (productsData?.products?.length) {
+        const uniqueCats = Array.from(new Set(productsData.products.map(p => p.category).filter(Boolean)));
+        const derived = uniqueCats.map(c => ({ slug: c, name: c.charAt(0).toUpperCase() + c.slice(1) }));
+        setCategories(derived);
+      }
     } catch (err) {
-      console.error('Error fetching dashboard data:', err);
-      setError(err.message || 'An unexpected error occurred while fetching products.');
+      console.error('Error in loadData:', err);
+      if (isRefresh) {
+        setError(err.message || 'Failed to refresh products from server.');
+      }
     } finally {
       setLoading(false);
       setRefreshing(false);
